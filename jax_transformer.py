@@ -57,10 +57,13 @@ def print_variables(cx):
 # End framework 
 # ----------------------------------------
 
-def normax(shape, axis=-1):
+def normax(shape, axis):
     out = npr.randn(*shape).astype(np.float32)
     out /= onp.sqrt(np.square(out).sum(axis=axis, keepdims=True))
     return out
+
+def normc(*shape):
+    return normax(shape, axis=0)
 
 def randn(shape, stddev):
     return npr.randn(*shape).astype(np.float32) * stddev
@@ -72,7 +75,7 @@ def unstable_softmax(x, axis=-1):
 def gelu(x):
     return 0.5*x*(1+np.tanh(0.79788*(x+0.044715*x**3)))
 
-def _norm(x, g=None, b=None, e=1e-5, axis=(1,)):
+def _norm(x, *, axis, g=None, b=None, e=1e-5):
     u = np.mean(x, axis=axis, keepdims=True)
     s = np.mean(np.square(x-u), axis=axis, keepdims=True)
     x = (x - u) / np.sqrt(s + e)
@@ -84,7 +87,7 @@ def norm(cx, x, axis=(-1,)):
     n_state = x.shape[-1]
     g = cx.get_variable("g", initializer=lambda : onp.ones(n_state, 'f'))
     b = cx.get_variable("b", initializer=lambda : onp.zeros(n_state, 'f'))
-    return _norm(x, g, b, axis=axis)
+    return _norm(x, g=g, b=b, axis=axis)
 
 def mask_attn_weights(w):
     n = w.shape[-1]
@@ -107,7 +110,7 @@ def _attn(Q_bhtr, K_bhrt, V_bhtr):
 def dense(cx, X_btk, F):
     B, T, K = X_btk.shape
     X_bt_k = np.reshape(X_btk, (-1, K))
-    W_kf = cx.get_variable("w", initializer=lambda : normax(shape=(K, F)))
+    W_kf = cx.get_variable("w", initializer=lambda : normc(K, F))
     b_f = cx.get_variable("b", initializer=lambda : onp.zeros(F,'f'))
     Y_bt_f = np.matmul(X_bt_k, W_kf) + b_f
     return np.reshape(Y_bt_f, (B, T, F))
@@ -131,7 +134,7 @@ def attn(cx, X_btk, n_state, n_head):
 
 def mlp(cx, X_bts, *, n_hid):
     S = X_bts.shape[-1]
-    H_bth = gelu(dense(cx.scope('c_fc'), X_bts, n_hid))
+    H_bth = stax.relu(dense(cx.scope('c_fc'), X_bts, n_hid))
     Y_bts = dense(cx.scope('c_proj'), H_bth, S)
     return Y_bts
 
@@ -143,12 +146,12 @@ def block(cx, X_bts, *, n_head):
     Y_bts = norm(cx.scope('ln_2'), N_bts + M_bts)
     return Y_bts
 
-def embed(cx, tok_b_t, pos_bt, *, n_vocab, n_embd, n_ctx):
+def embed(cx, tok_bt, pos_bt, *, n_vocab, n_embd, n_ctx):
     tokenembs_qe = cx.get_variable('tokenembs', 
-        initializer=lambda : normax((n_vocab, n_embd)) * 0.02)
+        initializer=lambda : normc(n_vocab, n_embd))
     posembs_pe = cx.get_variable('posembs', 
-        initializer=lambda : normax((n_ctx, n_embd)) * 0.02)
-    tokenemb_bte = tokenembs_qe[tok_b_t]
+        initializer=lambda : normc(n_ctx, n_embd))
+    tokenemb_bte = tokenembs_qe[tok_bt]
     posemb_bte = posembs_pe[pos_bt]
     return tokenemb_bte + posemb_bte
 
@@ -224,8 +227,10 @@ def main():
         return v, opt_update(i, g, opt_state)
 
 
-    for _epoch in range(1000):
+    for epoch in range(1000):
+        print('Epoch', epoch)
         for XY in dataset_util.iterbatches(Xtr_bt, batch_size=batch_size):
+            # print(''.join([codebook.idx2token(y) for y in XY[0][0]]).replace('\n','|'))
             lossval, opt_state = update(0, opt_state, XY)
             print(lossval)
 
