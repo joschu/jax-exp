@@ -21,17 +21,21 @@ def create_root_context():
     return VariableContext({}, '')
 
 class VariableContext(object):
-    def __init__(self, name2val, prefix):
+    def __init__(self, name2val, prefix, allow_new=True):
         self.name2val = name2val
         self.prefix = prefix
+        self.allow_new = allow_new
     def scope(self, name):
-        return VariableContext(self.name2val, self._join(self.prefix, name))
+        return VariableContext(self.name2val, 
+            self._join(self.prefix, name), self.allow_new)
     def get_variable(self, name, initializer):
         return self.get_variable_absolute(
             name=self._join(self.prefix, name), 
             initializer=initializer)
     def get_variable_absolute(self, name, initializer):
         if name not in self.name2val:
+            assert self.allow_new
+            print('making', name)
             self.name2val[name] = initializer()
         return self.name2val[name]
     def _join(self, *xs):
@@ -41,7 +45,11 @@ class VariableContext(object):
     def replace_with_list(self, newlist):
         assert len(newlist) == len(self.name2val)
         name2val = {k : v for (k, v) in zip(self.name2val.keys(), newlist)}
-        return VariableContext(name2val, self.prefix)
+        return VariableContext(name2val, self.prefix, self.allow_new)
+
+def print_variables(cx):
+    for (name, val) in sorted(cx.name2val.items()):
+        print(f'{name:20s} {str(val.shape):20s} {str(val.dtype):20s}')
 
 # End framework 
 # ----------------------------------------
@@ -58,7 +66,6 @@ def randn(shape, stddev):
     return npr.randn(*shape).astype(np.float32) * stddev
 
 def unstable_softmax(x, axis=-1):
-    # ONLY HERE TO CIRCUMVENT JAX BUG
     unnormalized = np.exp(x)
     return unnormalized / unnormalized.sum(axis, keepdims=True)
 
@@ -136,20 +143,20 @@ def block(cx, X_bts, *, n_head):
     Y_bts = norm(cx.scope('ln_2'), N_bts + M_bts)
     return Y_bts
 
-def embed(cx, tok_b_t, pos_b_t, *, n_vocab, n_embd, n_ctx):
+def embed(cx, tok_b_t, pos_bt, *, n_vocab, n_embd, n_ctx):
     tokenembs_qe = cx.get_variable('tokenembs', 
         initializer=lambda : normax((n_vocab, n_embd)) * 0.02)
     posembs_pe = cx.get_variable('posembs', 
         initializer=lambda : normax((n_ctx, n_embd)) * 0.02)
     tokenemb_bte = tokenembs_qe[tok_b_t]
-    posemb_bte = posembs_pe[pos_b_t]
+    posemb_bte = posembs_pe[pos_bt]
     return tokenemb_bte + posemb_bte
 
 
 def transformer(cx, X_bt, *, n_vocab, n_head, n_layer, n_ctx, n_embd):
     B, T = X_bt.shape
-    pos_b_t = onp.tile(onp.arange(T)[None,:], (B,1))
-    h_bte = embed(cx.scope('embed'), X_bt, pos_b_t, 
+    pos_bt = onp.tile(onp.arange(T)[None,:], (B,1))
+    h_bte = embed(cx.scope('embed'), X_bt, pos_bt,
         n_vocab=n_vocab, n_embd=n_embd, n_ctx=n_ctx)
     last_bts = h_bte
     for layer in range(n_layer):
@@ -186,21 +193,25 @@ def main():
 
     Xtr_bt, Xte_bt = train_test_split(flatdata, text, n_ctx)
 
-    cx = create_root_context()
+    root_cx = create_root_context()
 
-    def loss(params, XY_bt, cx=cx):
-        if params is not None:
-            cx = cx.replace_with_list(params)
+    def loss(params, XY_bt):
+        if params is None:
+            cx = root_cx
+        else:
+            cx = root_cx.replace_with_list(params)
         X_bt = XY_bt[:, :-1]
         B, T = X_bt.shape
         Y_bt = XY_bt[:, 1:]
-        Yonehot_btq = Y_bt[:,:,None] == np.arange(codebook.size)
+        Yonehot_btq = Y_bt[:,:,None] == onp.arange(codebook.size)
         logprobs_btq = model(cx, X_bt)
         logloss = - np.sum(Yonehot_btq * logprobs_btq) / (B * T)
         return logloss
 
-    loss(None, Xtr_bt[:10])
-    init_params = cx.variables_list()
+    loss(None, Xtr_bt[:batch_size])
+    root_cx.allow_new = False
+    print_variables(root_cx)
+    init_params = root_cx.variables_list()
 
     opt_init, opt_update = minmax.adam(step_size=3e-4)
     opt_state = opt_init(init_params)
