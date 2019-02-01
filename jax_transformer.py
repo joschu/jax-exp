@@ -36,7 +36,10 @@ class VariableContext(object):
         if name not in self.name2val:
             assert self.allow_new
             print('making', name)
-            self.name2val[name] = initializer()
+            val = initializer()
+            assert isinstance(val, onp.ndarray) and val.dtype == onp.float32
+            self.name2val[name] = val
+
         return self.name2val[name]
     def _join(self, *xs):
         return '/'.join(xs)
@@ -54,12 +57,9 @@ def print_variables(cx):
 # End framework 
 # ----------------------------------------
 
-ones = functools.partial(np.ones, dtype=np.float32)
-zeros = functools.partial(np.zeros, dtype=np.float32)
-
 def normax(shape, axis=-1):
     out = npr.randn(*shape).astype(np.float32)
-    out /= np.sqrt(np.square(out).sum(axis=axis, keepdims=True))
+    out /= onp.sqrt(np.square(out).sum(axis=axis, keepdims=True))
     return out
 
 def randn(shape, stddev):
@@ -82,13 +82,13 @@ def _norm(x, g=None, b=None, e=1e-5, axis=(1,)):
 
 def norm(cx, x, axis=(-1,)):
     n_state = x.shape[-1]
-    g = cx.get_variable("g", initializer=lambda : ones(n_state))
-    b = cx.get_variable("b", initializer=lambda : zeros(n_state))
+    g = cx.get_variable("g", initializer=lambda : onp.ones(n_state, 'f'))
+    b = cx.get_variable("b", initializer=lambda : onp.zeros(n_state, 'f'))
     return _norm(x, g, b, axis=axis)
 
 def mask_attn_weights(w):
     n = w.shape[-1]
-    b = np.tril(ones((n,n)))
+    b = np.tril(np.ones((n,n)))
     b = np.reshape(b, (1, 1, n, n))
     w = w * b - 1e9 * (1 - b)
     return w
@@ -108,7 +108,7 @@ def dense(cx, X_btk, F):
     B, T, K = X_btk.shape
     X_bt_k = np.reshape(X_btk, (-1, K))
     W_kf = cx.get_variable("w", initializer=lambda : normax(shape=(K, F)))
-    b_f = cx.get_variable("b", initializer=lambda : zeros(F))
+    b_f = cx.get_variable("b", initializer=lambda : onp.zeros(F,'f'))
     Y_bt_f = np.matmul(X_bt_k, W_kf) + b_f
     return np.reshape(Y_bt_f, (B, T, F))
 
