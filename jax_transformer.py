@@ -10,6 +10,7 @@ import jax.numpy as np
 import numpy as onp
 import numpy.random as npr
 import re
+import os
 import jax
 
 # ================================================================
@@ -89,15 +90,12 @@ def _attn(Q_bhtr, K_bhrt, V_bhtr):
     R = Q_bhtr.shape[-1]
     W_bhtt = np.matmul(Q_bhtr, K_bhrt) / np.sqrt(R)
     W_bhtt = mask_attn_weights(W_bhtt)
-    W_bhtt = stax.softmax(W_bhtt, axis=-1)
+    if os.getenv('bug'):
+        W_bhtt = stax.softmax(W_bhtt, axis=-1)
+    else:
+        W_bhtt = unstable_softmax(W_bhtt, axis=-1)
     A_bhtr = np.matmul(W_bhtt, V_bhtr)
     return A_bhtr
-
-def split_states(x, n):
-    x_shape = x.shape
-    m = x_shape[-1]
-    new_x_shape = x_shape[:-1]+(n, m//n)
-    return np.reshape(x, new_x_shape)
 
 def dense(cx, X_btk, F):
     B, T, K = X_btk.shape
