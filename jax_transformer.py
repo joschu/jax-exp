@@ -59,7 +59,10 @@ def print_variables(cx):
 
 def normax(shape, axis):
     out = npr.randn(*shape).astype(np.float32)
-    out /= onp.sqrt(np.square(out).sum(axis=axis, keepdims=True))
+    if os.getenv('bug2'):
+        out /= onp.sqrt(np.square(out).sum(axis=axis, keepdims=True))
+    else:
+        out /= onp.sqrt(onp.square(out).sum(axis=axis, keepdims=True))
     return out
 
 def normc(*shape):
@@ -83,8 +86,8 @@ def _norm(x, *, axis, g=None, b=None, e=1e-5):
         x = x * g + b
     return x
 
-def norm(cx, x, axis=(-1,)):
-    n_state = x.shape[-1]
+def norm(cx, x, axis=-1):
+    n_state = x.shape[axis]
     g = cx.get_variable("g", initializer=lambda : onp.ones(n_state, 'f'))
     b = cx.get_variable("b", initializer=lambda : onp.zeros(n_state, 'f'))
     return _norm(x, g=g, b=b, axis=axis)
@@ -99,7 +102,8 @@ def mask_attn_weights(w):
 def _attn(Q_bhtr, K_bhrt, V_bhtr):
     R = Q_bhtr.shape[-1]
     W_bhtt = np.matmul(Q_bhtr, K_bhrt) / np.sqrt(R)
-    W_bhtt = mask_attn_weights(W_bhtt)
+    if not os.getenv('nomask'):
+        W_bhtt = mask_attn_weights(W_bhtt)
     if os.getenv('bug'):
         W_bhtt = stax.softmax(W_bhtt, axis=-1)
     else:
@@ -141,16 +145,16 @@ def mlp(cx, X_bts, *, n_hid):
 def block(cx, X_bts, *, n_head):
     _B, _T, S = X_bts.shape
     A_bts = attn(cx.scope('attn'), X_bts, S, n_head)
-    N_bts = norm(cx.scope('ln_1'), X_bts + A_bts)
+    N_bts = norm(cx.scope('ln_1'), X_bts + A_bts, axis=-1)
     M_bts = mlp(cx.scope('mlp'), N_bts, n_hid=S * 4)
-    Y_bts = norm(cx.scope('ln_2'), N_bts + M_bts)
+    Y_bts = norm(cx.scope('ln_2'), N_bts + M_bts, axis=-1)
     return Y_bts
 
 def embed(cx, tok_bt, pos_bt, *, n_vocab, n_embd, n_ctx):
     tokenembs_qe = cx.get_variable('tokenembs', 
-        initializer=lambda : normc(n_vocab, n_embd))
+        initializer=lambda : normc(n_vocab, n_embd) * 0.1)
     posembs_pe = cx.get_variable('posembs', 
-        initializer=lambda : normc(n_ctx, n_embd))
+        initializer=lambda : normc(n_ctx, n_embd) * 0.1)
     tokenemb_bte = tokenembs_qe[tok_bt]
     posemb_bte = posembs_pe[pos_bt]
     return tokenemb_bte + posemb_bte
@@ -165,7 +169,7 @@ def transformer(cx, X_bt, *, n_vocab, n_head, n_layer, n_ctx, n_embd):
     for layer in range(n_layer):
         last_bts = block(cx.scope(f'h{layer:02d}'), last_bts, n_head=n_head)
     logits_btq = np.matmul(last_bts, cx.get_variable('embed/tokenembs', initializer=None).T)
-    logprobs_btq = stax.logsoftmax(logits_btq)
+    logprobs_btq = stax.logsoftmax(logits_btq)    
     return logprobs_btq
 
 def train_test_split(flatdata, text, n_ctx):
