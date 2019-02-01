@@ -35,9 +35,9 @@ class VariableContext(object):
     def get_variable_absolute(self, name, initializer):
         if name not in self.name2val:
             assert self.allow_new
-            print('making', name)
             val = initializer()
-            assert isinstance(val, onp.ndarray) and val.dtype == onp.float32
+            if not os.getenv('init_bug'):
+                assert type(val) == onp.ndarray and val.dtype == onp.float32
             self.name2val[name] = val
 
         return self.name2val[name]
@@ -59,8 +59,8 @@ def print_variables(cx):
 
 def normax(shape, axis):
     out = npr.randn(*shape).astype(np.float32)
-    if os.getenv('bug2'):
-        out /= onp.sqrt(np.square(out).sum(axis=axis, keepdims=True))
+    if os.getenv('init_bug'):
+        out /= np.sqrt(np.square(out).sum(axis=axis, keepdims=True))
     else:
         out /= onp.sqrt(onp.square(out).sum(axis=axis, keepdims=True))
     return out
@@ -104,7 +104,7 @@ def _attn(Q_bhtr, K_bhrt, V_bhtr):
     W_bhtt = np.matmul(Q_bhtr, K_bhrt) / np.sqrt(R)
     if not os.getenv('nomask'):
         W_bhtt = mask_attn_weights(W_bhtt)
-    if os.getenv('bug'):
+    if os.getenv('softmax_bug'):
         W_bhtt = stax.softmax(W_bhtt, axis=-1)
     else:
         W_bhtt = unstable_softmax(W_bhtt, axis=-1)
@@ -189,8 +189,8 @@ def main():
     parser.add_argument('--load_model')
     args = parser.parse_args()
     flatdata, text, codebook = dataset_util.process_dataset(args.text_file)
-
-    n_ctx = 128
+    npr.seed(0)
+    n_ctx = 32
     batch_size = 64
     n_head = 4
     n_layer = 4
