@@ -11,6 +11,7 @@ import numpy as onp
 import numpy.random as npr
 import re
 import os
+import sys
 import jax
 
 # ================================================================
@@ -36,8 +37,7 @@ class VariableContext(object):
         if name not in self.name2val:
             assert self.allow_new
             val = initializer()
-            if not os.getenv('init_bug'):
-                assert type(val) == onp.ndarray and val.dtype == onp.float32
+            assert type(val) == onp.ndarray and val.dtype == onp.float32
             self.name2val[name] = val
 
         return self.name2val[name]
@@ -59,10 +59,7 @@ def print_variables(cx):
 
 def normax(shape, axis):
     out = npr.randn(*shape).astype(np.float32)
-    if os.getenv('init_bug'):
-        out /= np.sqrt(np.square(out).sum(axis=axis, keepdims=True))
-    else:
-        out /= onp.sqrt(onp.square(out).sum(axis=axis, keepdims=True))
+    out /= onp.sqrt(onp.square(out).sum(axis=axis, keepdims=True))
     return out
 
 def normc(*shape):
@@ -70,10 +67,6 @@ def normc(*shape):
 
 def randn(shape, stddev):
     return npr.randn(*shape).astype(np.float32) * stddev
-
-def unstable_softmax(x, axis=-1):
-    unnormalized = np.exp(x)
-    return unnormalized / unnormalized.sum(axis, keepdims=True)
 
 def gelu(x):
     return 0.5*x*(1+np.tanh(0.79788*(x+0.044715*x**3)))
@@ -102,12 +95,8 @@ def mask_attn_weights(w):
 def _attn(Q_bhtr, K_bhrt, V_bhtr):
     R = Q_bhtr.shape[-1]
     W_bhtt = np.matmul(Q_bhtr, K_bhrt) / np.sqrt(R)
-    if not os.getenv('nomask'):
-        W_bhtt = mask_attn_weights(W_bhtt)
-    if os.getenv('softmax_bug'):
-        W_bhtt = stax.softmax(W_bhtt, axis=-1)
-    else:
-        W_bhtt = unstable_softmax(W_bhtt, axis=-1)
+    W_bhtt = mask_attn_weights(W_bhtt)
+    W_bhtt = stax.softmax(W_bhtt, axis=-1)
     A_bhtr = np.matmul(W_bhtt, V_bhtr)
     return A_bhtr
 
@@ -123,10 +112,8 @@ def attn(cx, X_btk, n_state, n_head):
     B, T, _K = X_btk.shape
     assert n_state % n_head==0
     QKV_b_t_3s = dense(cx.scope('c_attn'), X_btk, n_state * 3)
-    QKV_bt3hr = np.reshape(QKV_b_t_3s, (B, T, 3, n_head, n_state // n_head))
-    Q_bthr = QKV_bt3hr[:,:,0]
-    K_bthr = QKV_bt3hr[:,:,1]
-    V_bthr = QKV_bt3hr[:,:,2]
+    QKV_b_t_3h_r = np.reshape(QKV_b_t_3s, (B, T, 3 * n_head, n_state // n_head))
+    Q_bthr, K_bthr, V_bthr = np.split(QKV_b_t_3h_r, 3, axis=2)
     Q_bhtr = np.transpose(Q_bthr, (0, 2, 1, 3))
     V_bhtr = np.transpose(V_bthr, (0, 2, 1, 3))
     K_bhrt = np.transpose(K_bthr, (0, 2, 3, 1))
@@ -150,29 +137,26 @@ def block(cx, X_bts, *, n_head):
     Y_bts = norm(cx.scope('ln_2'), N_bts + M_bts, axis=-1)
     return Y_bts
 
-def embed(cx, tok_bt, pos_bt, *, n_vocab, n_embd, n_ctx):
+def transformer(cx, tok_bt, *, n_vocab, n_head, n_layer, n_ctx, n_embd):
+    B, T = tok_bt.shape
+    pos_bt = jax.lax.broadcasted_iota(np.int32, (B, T), 1)
     tokenembs_qe = cx.get_variable('tokenembs', 
         initializer=lambda : normc(n_vocab, n_embd) * 0.1)
     posembs_pe = cx.get_variable('posembs', 
         initializer=lambda : normc(n_ctx, n_embd) * 0.1)
     tokenemb_bte = tokenembs_qe[tok_bt]
+    assert isinstance(tok_bt, np.ndarray)
     posemb_bte = posembs_pe[pos_bt]
-    return tokenemb_bte + posemb_bte
-
-
-def transformer(cx, X_bt, *, n_vocab, n_head, n_layer, n_ctx, n_embd):
-    B, T = X_bt.shape
-    pos_bt = onp.tile(onp.arange(T)[None,:], (B,1))
-    h_bte = embed(cx.scope('embed'), X_bt, pos_bt,
-        n_vocab=n_vocab, n_embd=n_embd, n_ctx=n_ctx)
-    last_bts = h_bte
+    last_bts = tokenemb_bte + posemb_bte
     for layer in range(n_layer):
         last_bts = block(cx.scope(f'h{layer:02d}'), last_bts, n_head=n_head)
-    logits_btq = np.matmul(last_bts, cx.get_variable('embed/tokenembs', initializer=None).T)
+    logits_btq = np.matmul(last_bts, tokenembs_qe.T)
     logprobs_btq = stax.logsoftmax(logits_btq)    
     return logprobs_btq
 
-def train_test_split(flatdata, text, n_ctx):
+def train_test_split(codebook, text, n_ctx):
+    # TODO start at every character
+    flatdata = onp.array([codebook.token2idx(token) for token in text])
     splits = [mo.end() for mo in re.finditer(r'\n\n|\. |; |: ',text)]
     starts = onp.concatenate([[0], splits])
     teststart = starts[int(len(starts) * 0.75)]
@@ -188,34 +172,32 @@ def main():
     parser.add_argument('text_file')
     parser.add_argument('--load_model')
     args = parser.parse_args()
-    flatdata, text, codebook = dataset_util.process_dataset(args.text_file)
+    text, codebook = dataset_util.process_dataset(args.text_file)
     npr.seed(0)
-    n_ctx = 32
+    n_ctx = 64
     batch_size = 64
     n_head = 4
     n_layer = 4
-    n_embd = 96
+    n_embd = 128
     model = functools.partial(transformer, n_vocab=codebook.size,
         n_head=n_head, n_layer=n_layer, n_ctx=n_ctx, n_embd=n_embd)
 
-    Xtr_bt, Xte_bt = train_test_split(flatdata, text, n_ctx)
-
+    Xtr_bt, Xte_bt = train_test_split(codebook, text, n_ctx)
     root_cx = create_root_context()
 
-    def loss(params, XY_bt):
-        if params is None:
-            cx = root_cx
-        else:
-            cx = root_cx.replace_with_list(params)
+    def loss(cx, XY_bt):
         X_bt = XY_bt[:, :-1]
         B, T = X_bt.shape
         Y_bt = XY_bt[:, 1:]
-        Yonehot_btq = Y_bt[:,:,None] == onp.arange(codebook.size)
         logprobs_btq = model(cx, X_bt)
-        logloss = - np.sum(Yonehot_btq * logprobs_btq) / (B * T)
-        return logloss
+        loglosses_bt = - logprobs_btq.reshape((B*T, -1))[
+            np.arange(B*T), Y_bt.reshape((-1,))]
+        return loglosses_bt.mean()
+    def loss2(params, XY_bt):
+        cx = root_cx.replace_with_list(params)
+        return loss(cx, XY_bt)
 
-    loss(None, Xtr_bt[:batch_size])
+    loss(root_cx, Xtr_bt[:batch_size]) # Just create variables
     root_cx.allow_new = False
     print_variables(root_cx)
     init_params = root_cx.variables_list()
@@ -227,16 +209,15 @@ def main():
     def update(i, opt_state, batch):
         XY, = batch
         params = minmax.get_params(opt_state)
-        v, g = jax.value_and_grad(loss)(params, XY)
+        v, g = jax.value_and_grad(loss2)(params, XY)
         return v, opt_update(i, g, opt_state)
-
 
     for epoch in range(1000):
         print('Epoch', epoch)
         for XY in dataset_util.iterbatches(Xtr_bt, batch_size=batch_size):
-            # print(''.join([codebook.idx2token(y) for y in XY[0][0]]).replace('\n','|'))
+            tstart = time.time()
             lossval, opt_state = update(0, opt_state, XY)
-            print(lossval)
+            print(f'loss={lossval} dur={time.time()-tstart}')
 
 
 if __name__ == '__main__':

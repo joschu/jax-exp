@@ -2,7 +2,7 @@ import joblib
 from tabulate import tabulate
 import numpy as np
 import io
-
+import collections
 
 class Codebook(object):
     def __init__(self, tokens):
@@ -45,9 +45,9 @@ def process_dataset(text_file, print_stats=True):
     with io.open(text_file, encoding='utf-8') as f:
         text = f.read().strip()
     codebook = make_codebook(text)
-    flatdata = [codebook.token2idx(token) for token in text]
     if print_stats:
-        counts = np.bincount(flatdata)
+        token2count = collections.Counter(text)
+        counts = np.array([token2count[c] for c in codebook.tokens])
         probs = counts / counts.sum()
         print(tabulate(zip(map(repr, codebook.tokens), probs, map(int, counts)),
                        headers=['tokens', 'probs', 'counts'], floatfmt='.3e'))
@@ -56,7 +56,7 @@ def process_dataset(text_file, print_stats=True):
             ('Marg ent', (probs * np.log(1 / probs)).sum()),
             ('Zip', zipratio * np.log(256))
         ]))
-    return np.array(flatdata), text, codebook
+    return text, codebook
 
 def iterbatches(*arrays, num_batches=None, batch_size=None, shuffle=True, include_final_partial_batch=True):
     assert (num_batches is None) != (batch_size is None), 'Provide num_batches or batch_size, but not both'
